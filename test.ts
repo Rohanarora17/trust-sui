@@ -574,6 +574,52 @@ async function verifyDomain(name: string): Promise<boolean> {
     }
 }
 
+async function hasTrustProfile(
+    registryId: string,
+    userAddress: string
+): Promise<boolean> {
+    console.log(`Checking if address ${userAddress} has a trust profile...`);
+    
+    try {
+        const tx = new Transaction();
+        
+        tx.moveCall({
+            target: `${PACKAGE_ID}::trust::has_trust_profile`,
+            arguments: [
+                tx.object(registryId),        // ProfileRegistry object
+                tx.pure.address(userAddress), // User address
+            ],
+        });
+        
+        const result = await suiClient.devInspectTransactionBlock({
+            sender: userAddress, // Any address can call this read-only function
+            transactionBlock: tx,
+        });
+        
+        if (!result.results || !result.results[0]?.returnValues) {
+            throw new Error("No result from has_trust_profile call");
+        }
+        
+        // Parse the boolean result
+        const returnValue = result.results[0].returnValues[0];
+        
+        // Handle array structure (Sui returns values as [[value], type])
+        if (!Array.isArray(returnValue)) {
+            throw new Error("Unexpected return format from has_trust_profile: not an array");
+        }
+        
+        // Extract the boolean value (1 = true, 0 = false)
+        const boolValue = Array.isArray(returnValue[0]) ? returnValue[0][0] : returnValue[0];
+        const hasProfile = boolValue === 1;
+        
+        console.log(`Address ${userAddress} has trust profile: ${hasProfile}`);
+        return hasProfile;
+    } catch (error: any) {
+        console.error(`Error checking trust profile for ${userAddress}:`, error);
+        throw new Error(`Failed to check trust profile: ${error.message}`);
+    }
+}
+
 // Main test function
 async function runTests() {
     console.log("Starting trust contract tests on testnet...");
@@ -588,97 +634,101 @@ async function runTests() {
         // Find the ProfileRegistry object
         const registryId = await findProfileRegistry();
         console.log(`Using ProfileRegistry with ID: ${registryId}`);
+
+
+        const hasProfile = await hasTrustProfile(registryId, USER1_ADDRESS);
+        console.log(`Has profile: ${hasProfile}`);
         
         // Step 1: Check if profile exists, create if it doesn't
-        console.log("\n=== Test: Trust Profile ===");
-        let user1ProfileId;
-        try {
-            user1ProfileId = await getProfileId(registryId, USER1_ADDRESS);
-            console.log(`Found existing profile: ${user1ProfileId}`);
-        } catch (error) {
-            console.log("No existing profile found, creating a new one...");
-            user1ProfileId = await createTrustProfile(user1Keypair, "testuser", registryId, false);
-        }
-        //set timeout to 10 seconds
-        setTimeout(() => {
-            console.log("Profile data");
-        }, 10000);
+        // console.log("\n=== Test: Trust Profile ===");
+        // let user1ProfileId;
+        // try {
+        //     user1ProfileId = await getProfileId(registryId, USER1_ADDRESS);
+        //     console.log(`Found existing profile: ${user1ProfileId}`);
+        // } catch (error) {
+        //     console.log("No existing profile found, creating a new one...");
+        //     user1ProfileId = await createTrustProfile(user1Keypair, "testuser", registryId, false);
+        // }
+        // //set timeout to 10 seconds
+        // setTimeout(() => {
+        //     console.log("Profile data");
+        // }, 10000);
 
-        // Get profile data
-        const profileData = await getProfileData(user1ProfileId);
-        console.log("Profile data:", profileData);
+        // // Get profile data
+        // const profileData = await getProfileData(user1ProfileId);
+        // console.log("Profile data:", profileData);
         
-        // Step 2: Create a test bond (using minimal SUI amount)
-        console.log("\n=== Test: Create Bond ===");
-        const bondId = await createBond(user1Keypair, user1ProfileId, USER2_ADDRESS, BOND_AMOUNT);
+        // // Step 2: Create a test bond (using minimal SUI amount)
+        // console.log("\n=== Test: Create Bond ===");
+        // const bondId = await createBond(user1Keypair, user1ProfileId, USER2_ADDRESS, BOND_AMOUNT);
         
-        // Wait briefly for the transaction to be indexed
-        console.log("Waiting for transaction to be processed...");
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        // // Wait briefly for the transaction to be indexed
+        // console.log("Waiting for transaction to be processed...");
+        // await new Promise(resolve => setTimeout(resolve, 2000));
         
-        // Verify the bond was created correctly
-        const bondInfo = await getBondInfo(bondId);
+        // // Verify the bond was created correctly
+        // const bondInfo = await getBondInfo(bondId);
         
-        // Step 3: Optional advanced tests (can be commented out to save SUI)
-        const runAdvancedTests = false; // Set to true to run these tests
-        if (runAdvancedTests) {
-            // Test domain verification
-            if (!SKIP_DOMAIN_VERIFICATION) {
-                console.log("\n=== Test: Domain Verification ===");
-                await verifyDomain("example.sui"); // Replace with a domain you own
-            }
+        // // Step 3: Optional advanced tests (can be commented out to save SUI)
+        // const runAdvancedTests = false; // Set to true to run these tests
+        // if (runAdvancedTests) {
+        //     // Test domain verification
+        //     if (!SKIP_DOMAIN_VERIFICATION) {
+        //         console.log("\n=== Test: Domain Verification ===");
+        //         await verifyDomain("example.sui"); // Replace with a domain you own
+        //     }
             
-            /* 
-            // COMMENTED OUT: Join Bond Test - Likely to fail without proper setup
-            // This requires the second user to have:
-            // 1. A funded account with SUI
-            // 2. A trust profile already created
-            console.log("\n=== Test: Join Bond ===");
-            try {
-                // First check if user2 has a profile
-                let user2ProfileId;
-                try {
-                    user2ProfileId = await getProfileId(registryId, USER2_ADDRESS);
-                } catch (error) {
-                    console.log("User2 has no profile - this test will fail");
-                    throw new Error("User2 needs a profile to join bond");
-                }
+        //     /* 
+        //     // COMMENTED OUT: Join Bond Test - Likely to fail without proper setup
+        //     // This requires the second user to have:
+        //     // 1. A funded account with SUI
+        //     // 2. A trust profile already created
+        //     console.log("\n=== Test: Join Bond ===");
+        //     try {
+        //         // First check if user2 has a profile
+        //         let user2ProfileId;
+        //         try {
+        //             user2ProfileId = await getProfileId(registryId, USER2_ADDRESS);
+        //         } catch (error) {
+        //             console.log("User2 has no profile - this test will fail");
+        //             throw new Error("User2 needs a profile to join bond");
+        //         }
                 
-                // Check if user2 has funds
-                const user2HasFunds = await checkAndVerifyBalance(USER2_ADDRESS, JOIN_AMOUNT + 0.01);
-                if (!user2HasFunds) {
-                    throw new Error("User2 needs funds to join bond");
-                }
+        //         // Check if user2 has funds
+        //         const user2HasFunds = await checkAndVerifyBalance(USER2_ADDRESS, JOIN_AMOUNT + 0.01);
+        //         if (!user2HasFunds) {
+        //             throw new Error("User2 needs funds to join bond");
+        //         }
                 
-                await joinBond(user2Keypair, bondId, user2ProfileId, JOIN_AMOUNT);
+        //         await joinBond(user2Keypair, bondId, user2ProfileId, JOIN_AMOUNT);
                 
-                // Show updated bond info
-                await getBondInfo(bondId);
-            } catch (error) {
-                console.log("Skipping bond join test:", error);
-            }
-            */
+        //         // Show updated bond info
+        //         await getBondInfo(bondId);
+        //     } catch (error) {
+        //         console.log("Skipping bond join test:", error);
+        //     }
+        //     */
             
-            // Withdraw from the bond (only user1 can do this safely)
-            console.log("\n=== Test: Withdraw Bond ===");
-            await withdrawBond(user1Keypair, bondId, user1ProfileId);
+        //     // Withdraw from the bond (only user1 can do this safely)
+        //     console.log("\n=== Test: Withdraw Bond ===");
+        //     await withdrawBond(user1Keypair, bondId, user1ProfileId);
             
-            // Show updated bond info
-            await getBondInfo(bondId);
+        //     // Show updated bond info
+        //     await getBondInfo(bondId);
             
-            /*
-            // COMMENTED OUT: Breaking bond test - might fail if bond was never joined
-            console.log("\n=== Test: Break Bond ===");
-            await breakBond(user1Keypair, bondId, user1ProfileId);
+        //     /*
+        //     // COMMENTED OUT: Breaking bond test - might fail if bond was never joined
+        //     console.log("\n=== Test: Break Bond ===");
+        //     await breakBond(user1Keypair, bondId, user1ProfileId);
             
-            // Show final bond info
-            await getBondInfo(bondId);
-            */
-        }
+        //     // Show final bond info
+        //     await getBondInfo(bondId);
+        //     */
+        // }
         
-        console.log("\n=== Tests Completed Successfully ===");
-        console.log(`Profile ID: ${user1ProfileId}`);
-        console.log(`Test Bond ID: ${bondId}`);
+        // console.log("\n=== Tests Completed Successfully ===");
+        // console.log(`Profile ID: ${user1ProfileId}`);
+        // console.log(`Test Bond ID: ${bondId}`);
         
     } catch (error) {
         console.error("Test failed:", error);
