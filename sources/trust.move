@@ -8,6 +8,17 @@ module trust::trust {
     use sui::object::{Self, UID, ID};
     use sui::transfer;
     use sui::tx_context::{Self, TxContext};
+    use sui::table::{Self, Table};
+   
+
+    use suins::{ 
+        suins::SuiNS,
+        registry::Registry,
+        domain
+    };
+    use suins::suins::registry;
+    use suins::suins;
+    use std::option::{Self, Option};
 
     // Error constants
     const ENotBondCreator: u64 = 0;
@@ -17,6 +28,16 @@ module trust::trust {
     const EInsufficientFunds: u64 = 4;
     const ECannotJoinOwnBond: u64 = 5;
     const ENotParticipant: u64 = 6;
+    const ENameNotFound: u64 = 7;
+    const ENameNotPointingToAddress: u64 = 8;
+    const ENameExpired: u64 = 9;
+    const EBlobNotCertified: u64 = 10;
+    const EInsufficientStorage: u64 = 11;
+    const EProfileAlreadyExists: u64 = 12;
+    const EInvalidDomain: u64 = 13;
+    const EProfileNotFound: u64 = 14;
+    const MIN_STORAGE_EPOCHS: u32 = 100; // Minimum storage duration (e.g., 100 epochs)
+
     // Events
     public struct ProfileCreated has copy, drop {
         profile_id: object::ID,
@@ -49,6 +70,12 @@ module trust::trust {
         amount_taken: u64
     }
 
+    // Registry to track which addresses have profiles
+    public struct ProfileRegistry has key {
+        id: UID,
+        profiles: Table<address, ID>,  // Map of address to profile ID
+    }
+
     public struct TrustProfile has key, store {
         id: UID,
         name: String,
@@ -77,12 +104,35 @@ module trust::trust {
         updated_at: u64,
     }
 
+    // Initialize the registry
+    fun init(ctx: &mut TxContext) {
+        let registry = ProfileRegistry {
+            id: object::new(ctx),
+            profiles: table::new(ctx),
+        };
+        transfer::share_object(registry);
+    }
+
     // Create a trust profile for a new user
     public entry fun create_trust_profile(
+        registry: &mut ProfileRegistry,
         name: String,
+        should_verify_domain: bool,
+        suins: &SuiNS,
         clock: &Clock,
         ctx: &mut TxContext
     ) {
+        let sender = tx_context::sender(ctx);
+        
+        // Check if profile already exists for this address
+        assert!(!table::contains(&registry.profiles, sender), EProfileAlreadyExists);
+        
+        // If should_verify_domain is true, verify the domain
+        if (should_verify_domain) {
+            let is_valid = verify_domain(name, suins, clock, ctx);
+            assert!(is_valid, EInvalidDomain);
+        };
+        
         let profile_id = object::new(ctx);
         let id_copy = object::uid_to_inner(&profile_id);
         
@@ -101,17 +151,18 @@ module trust::trust {
             updated_at: clock::timestamp_ms(clock),
         };
         
+        // Register the profile in the registry
+        table::add(&mut registry.profiles, sender, id_copy);
+        
         // Emit event
         event::emit(ProfileCreated {
             profile_id: id_copy,
-            owner: tx_context::sender(ctx),
+            owner: sender,
             name
         });
         
-        transfer::transfer(profile, tx_context::sender(ctx));
+        transfer::transfer(profile, sender);
     }
-
-
      
     // SignedInt struct for representing signed integers
     public struct SignedInt has drop{
@@ -137,6 +188,52 @@ module trust::trust {
             // For positive delta, add to value
             value + delta.magnitude
         }
+    }
+    // Check if a user has a trust profile
+    public fun has_trust_profile(
+        registry: &ProfileRegistry,
+        user_address: address
+    ): bool {
+        table::contains(&registry.profiles, user_address)
+    }
+
+    // Get the trust profile ID for a user
+    public fun get_profile_id(
+        registry: &ProfileRegistry,
+        user_address: address
+    ): ID {
+        assert!(table::contains(&registry.profiles, user_address), EProfileNotFound);
+        *table::borrow(&registry.profiles, user_address)
+    }
+
+
+    // Comprehensive function to get all profile data in one call
+    public fun get_profile_data(profile: &TrustProfile): (
+        String,  // name
+        u64,     // total_bonds
+        u64,     // active_bonds
+        u64,     // withdrawn_bonds
+        u64,     // broken_bonds
+        u64,     // money_in_active_bonds
+        u64,     // money_in_withdrawn_bonds
+        u64,     // money_in_broken_bonds
+        u64,     // trust_score
+        u64,     // created_at
+        u64      // updated_at
+    ) {
+        (
+            profile.name,
+            profile.total_bonds,
+            profile.active_bonds,
+            profile.withdrawn_bonds,
+            profile.broken_bonds,
+            profile.money_in_active_bonds,
+            profile.money_in_withdrawn_bonds,
+            profile.money_in_broken_bonds,
+            profile.trust_score,
+            profile.created_at,
+            profile.updated_at
+        )
     }
     
     // Internal function to update a trust profile
@@ -203,7 +300,6 @@ module trust::trust {
         };
         
         // Update sender's profile
-
         update_profile(
             recipient_profile,
             create_signed_int(1, false), // +1 active bond
@@ -256,7 +352,6 @@ module trust::trust {
         bond.updated_at = clock::timestamp_ms(clock);
         
         // Update sender's profile
-
         update_profile(
             sender_profile,
             create_signed_int(1, false), // +1 active bond
@@ -279,44 +374,44 @@ module trust::trust {
 
     // Withdraw funds from a bond
     public entry fun withdraw_bond(
-    bond: &mut TrustBond,
-    profile: &mut TrustProfile,
-    clock: &Clock,
-    ctx: &mut TxContext
-) {
-    assert!(bond.bond_status == 0, EBondNotActive);
-    assert!(tx_context::sender(ctx) == bond.user_1 || tx_context::sender(ctx) == bond.user_2, ENotParticipant);
-    
-    let sender = tx_context::sender(ctx);
-    let withdrawn_amount = if (sender == bond.user_1) {
-        balance::value(&bond.money_by_user_1)
-    } else {
-        balance::value(&bond.money_by_user_2)
-    };
-    
-    if (sender == bond.user_1) {
-        let balance = balance::withdraw_all(&mut bond.money_by_user_1);
-        let coin = coin::from_balance(balance, ctx);
-        transfer::public_transfer(coin, sender);
-    } else {
-        let balance = balance::withdraw_all(&mut bond.money_by_user_2);
-        let coin = coin::from_balance(balance, ctx);
-        transfer::public_transfer(coin, sender);
-    };
-    
-    // Update bond_type based on remaining balances
-    bond.bond_type = if (balance::value(&bond.money_by_user_1) == 0 && balance::value(&bond.money_by_user_2) > 0) {
-        0 // One-way (user2 only)
-    } else if (balance::value(&bond.money_by_user_2) == 0 && balance::value(&bond.money_by_user_1) > 0) {
-        0 // One-way (user1 only)
-    } else if (balance::value(&bond.money_by_user_1) > 0 && balance::value(&bond.money_by_user_2) > 0) {
-        1 // Two-way
-    } else {
-        0 // No contributions (optional, depending on your logic)
-    };
-    
-    bond.updated_at = clock::timestamp_ms(clock);
-}
+        bond: &mut TrustBond,
+        profile: &mut TrustProfile,
+        clock: &Clock,
+        ctx: &mut TxContext
+    ) {
+        assert!(bond.bond_status == 0, EBondNotActive);
+        assert!(tx_context::sender(ctx) == bond.user_1 || tx_context::sender(ctx) == bond.user_2, ENotParticipant);
+        
+        let sender = tx_context::sender(ctx);
+        let withdrawn_amount = if (sender == bond.user_1) {
+            balance::value(&bond.money_by_user_1)
+        } else {
+            balance::value(&bond.money_by_user_2)
+        };
+        
+        if (sender == bond.user_1) {
+            let balance = balance::withdraw_all(&mut bond.money_by_user_1);
+            let coin = coin::from_balance(balance, ctx);
+            transfer::public_transfer(coin, sender);
+        } else {
+            let balance = balance::withdraw_all(&mut bond.money_by_user_2);
+            let coin = coin::from_balance(balance, ctx);
+            transfer::public_transfer(coin, sender);
+        };
+        
+        // Update bond_type based on remaining balances
+        bond.bond_type = if (balance::value(&bond.money_by_user_1) == 0 && balance::value(&bond.money_by_user_2) > 0) {
+            0 // One-way (user2 only)
+        } else if (balance::value(&bond.money_by_user_2) == 0 && balance::value(&bond.money_by_user_1) > 0) {
+            0 // One-way (user1 only)
+        } else if (balance::value(&bond.money_by_user_1) > 0 && balance::value(&bond.money_by_user_2) > 0) {
+            1 // Two-way
+        } else {
+            0 // No contributions (optional, depending on your logic)
+        };
+        
+        bond.updated_at = clock::timestamp_ms(clock);
+    }
 
     // Break a bond (take all funds, including the other person's)
     public entry fun break_bond(
@@ -411,5 +506,40 @@ module trust::trust {
         )
     }
 
-}
+    public fun verify_domain(
+        name: String,           // The .sui domain name (e.g., "alice.sui")
+        suins: &SuiNS,          // Reference to SuiNS for domain lookup
+        clock: &Clock,          // Clock for timestamp checks
+        ctx: &TxContext         // Transaction context to get the signer
+    ): bool {
+        let sender = tx_context::sender(ctx);
 
+        // Create a domain object from the provided name
+        let domain = domain::new(name);
+
+        // We need to follow the original method call pattern exactly
+        // This suggests sui_ns uses dot notation method calls in its API
+        let registry = suins.registry<Registry>();
+        let mut optional = registry.lookup(domain);
+        
+        // Check if domain exists
+        if (optional.is_none()) {
+            return false
+        };
+
+        let name_record = optional.extract();
+
+        // Check if domain points to sender's address
+        if (!name_record.target_address().is_some() || 
+            name_record.target_address().extract() != sender) {
+            return false
+        };
+
+        // Check if domain is expired (note: original had this logic reversed)
+        if (name_record.has_expired(clock)) {
+            return false
+        };
+
+        true // Return true if all checks pass
+    }
+}

@@ -6,16 +6,35 @@ import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { bcs } from '@mysten/sui/bcs';
 import { SuiObjectChange } from '@mysten/sui/client';
 
-const suiClient = new SuiClient({ url: getFullnodeUrl('localnet') });
+const suiClient = new SuiClient({ url: getFullnodeUrl('testnet') });
 console.log("Connected to network:", suiClient.network);
 
+import { SuinsClient, SuinsTransaction } from '@mysten/suins';
+
+ 
+// You need a Sui client. You can re-use the Sui client of your project
+// (it's not recommended to create a new one).
+const client = new SuiClient({ url: getFullnodeUrl('testnet') });
+ 
+// Now you can use it to create a SuiNS client.
+const suinsClient = new SuinsClient({
+	client,
+	network: 'testnet',
+});
+
+
+console.log("SuiNS client created", suinsClient);
+
+
+
+
 // Replace with your package ID from sui client publish output
-const PACKAGE_ID = '0xdd5a61ffa8344e6d06d0ddf4b0e58c12e7b4fd2bef1441e432c3f4591e05a091'; // TODO: Replace with actual package ID
+const PACKAGE_ID = '0x93f8fd1adc8c935a189c72fbe42efba1a71c695bd8fc43f80de3f206736c114b'; // TODO: Replace with actual package ID
 
 // Generate test keypairs (use secure storage in production)
 const user1KeypairData = new Uint8Array(32).fill(1);
 const user2KeypairData = new Uint8Array(32).fill(2);
-const user1Keypair = Ed25519Keypair.fromSecretKey(user1KeypairData);
+const user1Keypair = Ed25519Keypair.fromSecretKey("suiprivkey1qpsylkvfafzegxk36rqy5euzreurcpkdvhltmfu020qhadhzcux5q5dgjrf");
 const user2Keypair = Ed25519Keypair.fromSecretKey(user2KeypairData);
 
 // Get addresses
@@ -24,6 +43,29 @@ const USER2_ADDRESS = user2Keypair.toSuiAddress();
 
 console.log("User1 Address:", USER1_ADDRESS);
 console.log("User2 Address:", USER2_ADDRESS);
+
+const verifySuiName = async (name: string) => {
+    const transaction = new Transaction();
+    
+    transaction.moveCall({
+        target: `${PACKAGE_ID}::trust::verify_domain`,
+        arguments: [
+            transaction.pure.string(name),
+            ,
+            transaction.object('0x6'),
+            transaction.object('0x1'),
+        ],
+    });
+    const result = await suiClient.signAndExecuteTransaction({
+        signer: user1Keypair,
+        transaction: transaction,
+        options: {
+            showEffects: true,
+            showObjectChanges: true,
+        },
+    });
+    return result;
+}
 
 // Helper to convert from MIST to SUI
 const formatBalance = (balance: string | number): number => {
@@ -463,7 +505,8 @@ async function runTests() {
 }
 
 const main = async () => {
-    await runTests();
+    // await runTests();
+    await verifySuiName("rohan.sui");
 };
 
 main().catch(console.error);
