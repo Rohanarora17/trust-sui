@@ -268,6 +268,7 @@ async function getProfileId(
 // Function to create a bond
 async function createBond(
     fromKeypair: Ed25519Keypair,
+    userBondsId: string,
     fromProfileId: string,
     toAddress: string,
     amount: number
@@ -287,12 +288,52 @@ async function createBond(
     tx.moveCall({
         target: `${PACKAGE_ID}::trust::create_bond`,
         arguments: [
-            tx.object(fromProfileId),
-            tx.pure.address(toAddress),
-            coin,
-            tx.object('0x6'), // Clock
+            tx.object(userBondsId),    // user_bonds
+            tx.object(fromProfileId),  // recipient_profile
+            tx.pure.address(toAddress), // user_2
+            coin,                      // payment
+            tx.object('0x6'),          // clock
         ],
     });
+
+
+    async function getUserBondIds(userBondsId: string, userAddress: string): Promise<number[]> {
+        console.log(`Getting bond IDs for user ${userAddress}...`);
+        try {
+            const tx = new Transaction();
+            tx.moveCall({
+                target: `${PACKAGE_ID}::trust::get_user_bond_ids`,
+                arguments: [
+                    tx.object(userBondsId),
+                    tx.pure.address(userAddress),
+                ],
+            });
+            
+            const result = await suiClient.devInspectTransactionBlock({
+                sender: userAddress, // Any address can call this read-only function
+                transactionBlock: tx,
+            });
+            
+            if (!result.results || !result.results[0]?.returnValues) {
+                throw new Error("No result from get_user_bond_ids call");
+            }
+            
+            const returnValue = result.results[0].returnValues[0];
+            // In Sui, a vector<ID> is returned as an array of strings (object IDs)
+            if (!Array.isArray(returnValue[0])) {
+                throw new Error("Unexpected return format from get_user_bond_ids");
+            }
+            
+            const bondIds = returnValue[0].map(id => Number(id));
+            console.log(`Bond IDs for user ${userAddress}:`, bondIds);
+            return bondIds;
+        } catch (error) {
+            console.error(`Error getting bond IDs for ${userAddress}:`, error);
+            throw error;
+        }
+    }
+    
+    
     
     console.log("Executing bond creation transaction...");
     const result = await suiClient.signAndExecuteTransaction({
@@ -308,7 +349,6 @@ async function createBond(
         throw new Error(`Failed to create bond: ${result.effects?.status.error}`);
     }
     
-    // Handle null case by converting it to undefined
     const bondId = findCreatedObjectId(result.objectChanges ?? undefined, '::trust::TrustBond');
     if (!bondId) {
         throw new Error("Failed to create bond - no bond object found in transaction result");
@@ -638,6 +678,10 @@ async function runTests() {
 
         const hasProfile = await hasTrustProfile(registryId, USER1_ADDRESS);
         console.log(`Has profile: ${hasProfile}`);
+
+        const user1ProfileId = await getProfileId(registryId, USER1_ADDRESS)
+        console.log(`User1 profile ID: ${user1ProfileId}`);
+        
         
         // Step 1: Check if profile exists, create if it doesn't
         // console.log("\n=== Test: Trust Profile ===");
@@ -655,8 +699,8 @@ async function runTests() {
         // }, 10000);
 
         // // Get profile data
-        // const profileData = await getProfileData(user1ProfileId);
-        // console.log("Profile data:", profileData);
+        const profileData = await getProfileData(user1ProfileId);
+        console.log("Profile data:", profileData);
         
         // // Step 2: Create a test bond (using minimal SUI amount)
         // console.log("\n=== Test: Create Bond ===");

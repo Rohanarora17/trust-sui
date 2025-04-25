@@ -76,6 +76,11 @@ module trust::trust {
         profiles: Table<address, ID>,  // Map of address to profile ID
     }
 
+    public struct UserBonds has key {
+        id: UID,
+        bonds: Table<address, vector<ID>>,
+    }
+
     public struct TrustProfile has key, store {
         id: UID,
         name: String,
@@ -111,6 +116,12 @@ module trust::trust {
             profiles: table::new(ctx),
         };
         transfer::share_object(registry);
+
+        let user_bonds = UserBonds {
+            id: object::new(ctx),
+            bonds: table::new(ctx),
+        };
+        transfer::share_object(user_bonds);
     }
 
     // Create a trust profile for a new user
@@ -269,60 +280,79 @@ module trust::trust {
     }
 
     // Create a new bond with another user
-    public entry fun create_bond(
-        recipient_profile: &mut TrustProfile,
-        user_2: address,
-        payment: Coin<SUI>,
-        clock: &Clock,
-        ctx: &mut TxContext
-    ) {
-        let sender = tx_context::sender(ctx);
-        assert!(sender != user_2, ECannotJoinOwnBond);
-        
-        let amount = coin::value(&payment);
-        let bond_id = object::new(ctx);
-        let id_copy = object::uid_to_inner(&bond_id);
-        
-        // Create bond with payment
-        let payment_balance = coin::into_balance(payment);
-        
-        let bond = TrustBond {
-            id: bond_id,
-            user_1: sender,
-            user_2,
-            bond_amount: amount,
-            bond_type: 0, // One-way initially
-            bond_status: 0, // Active
-            money_by_user_1: payment_balance,
-            money_by_user_2: balance::zero(),
-            created_at: clock::timestamp_ms(clock),
-            updated_at: clock::timestamp_ms(clock),
-        };
-        
-        // Update sender's profile
-        update_profile(
-            recipient_profile,
-            create_signed_int(1, false), // +1 active bond
-            create_signed_int(0, false), // No change to withdrawn bonds
-            create_signed_int(0, false), // No change to broken bonds
-            create_signed_int(amount, false), // Add money to active bonds
-            create_signed_int(0, false), // No change to withdrawn bond money
-            create_signed_int(0, false), // No change to broken bond money
-            create_signed_int(0, false), // No change to trust score yet
-            clock
-        );
-        
-        // Emit event
-        event::emit(BondCreated {
-            bond_id: id_copy,
-            user_1: sender,
-            user_2,
-            amount
-        });
-        
-        // Transfer bond object to sender
-        transfer::share_object(bond);
+   public entry fun create_bond(
+    user_bonds: &mut UserBonds,
+    recipient_profile: &mut TrustProfile,
+    user_2: address,
+    payment: Coin<SUI>,
+    clock: &Clock,
+    ctx: &mut TxContext
+) {
+    let sender = tx_context::sender(ctx); // user_1
+    assert!(sender != user_2, 0); // Prevent self-bonding
+
+    // Create the bond object
+    let bond_id = object::new(ctx);
+    let id_copy = object::uid_to_inner(&bond_id);
+    let amount = coin::value(&payment);
+    let bond = TrustBond {
+        id: bond_id,
+        user_1: sender,
+        user_2,
+        bond_amount: amount,
+        bond_type: 0, // One-way bond initially
+        bond_status: 0, // Active
+        money_by_user_1: coin::into_balance(payment),
+        money_by_user_2: balance::zero(),
+        created_at: clock::timestamp_ms(clock),
+        updated_at: clock::timestamp_ms(clock),
+    };
+
+    // Update recipient_profile (existing logic, simplified)
+    update_profile(
+        recipient_profile,
+        create_signed_int(1, false), // +1 active bond
+        create_signed_int(0, false), // No change to withdrawn bonds
+        create_signed_int(0, false), // No change to broken bonds
+        create_signed_int(amount, false), // Add money to active bonds
+        create_signed_int(0, false), // No change to withdrawn bond money
+        create_signed_int(0, false), // No change to broken bond money
+        create_signed_int(10, false), // Increase trust score by 100 when bond is created
+        clock
+    );
+
+    // Update UserBonds for user_1 (sender)
+    let bonds_table = &mut user_bonds.bonds;
+    if (!table::contains(bonds_table, sender)) {
+        table::add(bonds_table, sender, vector::singleton(id_copy));
+    } else {
+        let user_bonds_vec = table::borrow_mut(bonds_table, sender);
+        vector::push_back(user_bonds_vec, id_copy);
+    };
+
+    // Update UserBonds for user_2 (recipient)
+    if (!table::contains(bonds_table, user_2)) {
+        table::add(bonds_table, user_2, vector::singleton(id_copy));
+    } else {
+        let user_bonds_vec = table::borrow_mut(bonds_table, user_2);
+        vector::push_back(user_bonds_vec, id_copy);
+    };
+
+    // Emit event (existing logic, assumed)
+    event::emit(BondCreated { bond_id: id_copy, user_1: sender, user_2, amount });
+
+    // Share the bond object
+    transfer::share_object(bond);
+
+}
+
+public fun get_user_bond_ids(user_bonds: &UserBonds, user_address: address): vector<ID> {
+    if (table::contains(&user_bonds.bonds, user_address)) {
+        *table::borrow(&user_bonds.bonds, user_address)
+    } else {
+        vector::empty<ID>()
     }
+ }
 
     // Join an existing bond by adding funds
     public entry fun join_bond(
@@ -373,121 +403,146 @@ module trust::trust {
     }
 
     // Withdraw funds from a bond
-    public entry fun withdraw_bond(
-        bond: &mut TrustBond,
-        profile: &mut TrustProfile,
-        clock: &Clock,
-        ctx: &mut TxContext
-    ) {
-        assert!(bond.bond_status == 0, EBondNotActive);
-        assert!(tx_context::sender(ctx) == bond.user_1 || tx_context::sender(ctx) == bond.user_2, ENotParticipant);
-        
-        let sender = tx_context::sender(ctx);
-        let withdrawn_amount = if (sender == bond.user_1) {
-            balance::value(&bond.money_by_user_1)
-        } else {
-            balance::value(&bond.money_by_user_2)
-        };
-        
-        if (sender == bond.user_1) {
-            let balance = balance::withdraw_all(&mut bond.money_by_user_1);
-            let coin = coin::from_balance(balance, ctx);
-            transfer::public_transfer(coin, sender);
-        } else {
-            let balance = balance::withdraw_all(&mut bond.money_by_user_2);
-            let coin = coin::from_balance(balance, ctx);
-            transfer::public_transfer(coin, sender);
-        };
-        
-        // Update bond_type based on remaining balances
-        bond.bond_type = if (balance::value(&bond.money_by_user_1) == 0 && balance::value(&bond.money_by_user_2) > 0) {
-            0 // One-way (user2 only)
-        } else if (balance::value(&bond.money_by_user_2) == 0 && balance::value(&bond.money_by_user_1) > 0) {
-            0 // One-way (user1 only)
-        } else if (balance::value(&bond.money_by_user_1) > 0 && balance::value(&bond.money_by_user_2) > 0) {
-            1 // Two-way
-        } else {
-            0 // No contributions (optional, depending on your logic)
-        };
-        
-        bond.updated_at = clock::timestamp_ms(clock);
-    }
+   public entry fun withdraw_bond(
+    bond: &mut TrustBond,
+    profile: &mut TrustProfile,
+    clock: &Clock,
+    ctx: &mut TxContext
+) {
+    assert!(bond.bond_status == 0, EBondNotActive);
+    assert!(tx_context::sender(ctx) == bond.user_1 || tx_context::sender(ctx) == bond.user_2, ENotParticipant);
+    
+    let sender = tx_context::sender(ctx);
+    let withdrawn_amount = if (sender == bond.user_1) {
+        balance::value(&bond.money_by_user_1)
+    } else {
+        balance::value(&bond.money_by_user_2)
+    };
+    
+    if (sender == bond.user_1) {
+        let balance = balance::withdraw_all(&mut bond.money_by_user_1);
+        let coin = coin::from_balance(balance, ctx);
+        transfer::public_transfer(coin, sender);
+    } else {
+        let balance = balance::withdraw_all(&mut bond.money_by_user_2);
+        let coin = coin::from_balance(balance, ctx);
+        transfer::public_transfer(coin, sender);
+    };
+    
+    // Update bond_type based on remaining balances
+    let user1_remaining = balance::value(&bond.money_by_user_1);
+    let user2_remaining = balance::value(&bond.money_by_user_2);
+    
+    bond.bond_type = if (user1_remaining == 0 && user2_remaining > 0) {
+        0 // One-way (user2 only)
+    } else if (user2_remaining == 0 && user1_remaining > 0) {
+        0 // One-way (user1 only)
+    } else if (user1_remaining > 0 && user2_remaining > 0) {
+        1 // Two-way
+    } else {
+        0 // No contributions
+    };
+    
+    // Update bond status if both parties have withdrawn
+    if (user1_remaining == 0 && user2_remaining == 0) {
+        bond.bond_status = 1; // Withdrawn
+    };
+    
+    // Update profile metrics
+    update_profile(
+        profile,
+        create_signed_int(0, false), // No change to active bonds if still active
+        create_signed_int(if (bond.bond_status == 1) { 1 } else { 0 }, false), // +1 withdrawn bond if status changed
+        create_signed_int(0, false), // No change to broken bonds
+        create_signed_int(withdrawn_amount, true), // Remove withdrawn money from active bonds
+        create_signed_int(withdrawn_amount, false), // Add to withdrawn bonds money
+        create_signed_int(0, false), // No change to broken bond money
+        create_signed_int(5, false), // No trust score penalty for withdrawal
+        clock
+    );
+    
+    bond.updated_at = clock::timestamp_ms(clock);
+    
+    // Emit event
+    event::emit(BondWithdrawn {
+        bond_id: object::uid_to_inner(&bond.id),
+        user: sender,
+        amount: withdrawn_amount
+    });
+}
 
     // Break a bond (take all funds, including the other person's)
     public entry fun break_bond(
-        bond: &mut TrustBond,
-        profile: &mut TrustProfile,
-        clock: &Clock,
-        ctx: &mut TxContext
-    ) {
-        let sender = tx_context::sender(ctx);
+    bond: &mut TrustBond,
+    profile: &mut TrustProfile,
+    clock: &Clock,
+    ctx: &mut TxContext
+) {
+    let sender = tx_context::sender(ctx);
+    
+    // Verify bond is active
+    assert!(bond.bond_status == 0, EBondNotActive);
+    
+    // Verify sender is part of the bond
+    assert!(sender == bond.user_1 || sender == bond.user_2, ENotBondParticipant);
+    
+    let user1_amount = balance::value(&bond.money_by_user_1);
+    let user2_amount = balance::value(&bond.money_by_user_2);
+    let total_amount = user1_amount + user2_amount;
+    
+    // Simplify the balance withdrawal and transfer
+    let coin_amount = if (sender == bond.user_1) {
+        // User 1 takes everything
+        let taken_from_2 = balance::withdraw_all(&mut bond.money_by_user_2);
+        let mut own_funds = balance::withdraw_all(&mut bond.money_by_user_1);
         
-        // Verify bond is active
-        assert!(bond.bond_status == 0, EBondNotActive);
+        // Combine balances
+        balance::join(&mut own_funds, taken_from_2);
+        coin::from_balance(own_funds, ctx)
+    } else {
+        // User 2 takes everything
+        let taken_from_1 = balance::withdraw_all(&mut bond.money_by_user_1);
+        let mut own_funds = balance::withdraw_all(&mut bond.money_by_user_2);
         
-        // Verify sender is part of the bond
-        assert!(sender == bond.user_1 || sender == bond.user_2, ENotBondParticipant);
-        
-        let user1_amount = balance::value(&bond.money_by_user_1);
-        let user2_amount = balance::value(&bond.money_by_user_2);
-        let total_amount = user1_amount + user2_amount;
-        
-        // Handle user1's balance
-        if (user1_amount > 0) {
-            let withdrawn1 = balance::withdraw_all(&mut bond.money_by_user_1);
-            if (sender == bond.user_1) {
-                balance::join(&mut bond.money_by_user_1, withdrawn1);
-            } else {
-                balance::join(&mut bond.money_by_user_2, withdrawn1);
-            };
-        };
-
-        // Handle user2's balance
-        if (user2_amount > 0) {
-            let withdrawn2 = balance::withdraw_all(&mut bond.money_by_user_2);
-            if (sender == bond.user_1) {
-                balance::join(&mut bond.money_by_user_1, withdrawn2);
-            } else {
-                balance::join(&mut bond.money_by_user_2, withdrawn2);
-            };
-        };
-        
-        let coin_to_transfer;
-        if (sender == bond.user_1) {
-            coin_to_transfer = coin::from_balance(balance::withdraw_all(&mut bond.money_by_user_1), ctx);
-        } else {
-            coin_to_transfer = coin::from_balance(balance::withdraw_all(&mut bond.money_by_user_2), ctx);
-        };
-        
-        transfer::public_transfer(coin_to_transfer, sender);
-        
-        // Mark bond as broken
-        bond.bond_status = 2; // Broken
-        bond.updated_at = clock::timestamp_ms(clock);
-        
-        // Determine how much was stolen
-        let stolen_amount = if (sender == bond.user_1) { user2_amount } else { user1_amount };
-        
-        // Update profile - severe trust penalty for breaking bond
-        update_profile(
-            profile,
-            create_signed_int(1, true), // -1 active bond
-            create_signed_int(0, false), // No change to withdrawn bonds
-            create_signed_int(1, false), // +1 broken bond
-            create_signed_int(total_amount, true), // Remove money from active bonds
-            create_signed_int(0, false), // No change to withdrawn bond money
-            create_signed_int(total_amount, false), // Add money to broken bonds
-            create_signed_int(50, true), // Trust penalty, higher if they took money
-            clock
-        );
-        
-        // Emit event
-        event::emit(BondBroken {
-            bond_id: object::uid_to_inner(&bond.id),
-            user: sender,
-            amount_taken: total_amount
-        });
-    }
+        // Combine balances
+        balance::join(&mut own_funds, taken_from_1);
+        coin::from_balance(own_funds, ctx)
+    };
+    
+    // Transfer the combined funds to the breaker
+    transfer::public_transfer(coin_amount, sender);
+    
+    // Mark bond as broken
+    bond.bond_status = 2; // Broken
+    bond.updated_at = clock::timestamp_ms(clock);
+    
+    // Determine how much was stolen from the other person
+    let stolen_amount = if (sender == bond.user_1) { 
+        user2_amount 
+    } else { 
+        user1_amount 
+    };
+    
+    // Update breaker's profile - severe trust penalty
+    update_profile(
+        profile,
+        create_signed_int(1, true), // -1 active bond
+        create_signed_int(0, false), // No change to withdrawn bonds
+        create_signed_int(1, false), // +1 broken bond
+        create_signed_int(total_amount, true), // Remove money from active bonds
+        create_signed_int(0, false), // No change to withdrawn bond money
+        create_signed_int(total_amount, false), // Add money to broken bonds
+        create_signed_int(if (stolen_amount > 0) { 50 } else {   10 }, true), // Higher penalty if funds were stolen
+        clock
+    );
+    
+    // Emit event
+    event::emit(BondBroken {
+        bond_id: object::uid_to_inner(&bond.id),
+        user: sender,
+        amount_taken: total_amount
+    });
+}
 
     // Get user's trust score from their profile
     public fun get_trust_score(profile: &TrustProfile): u64 {
