@@ -5,7 +5,7 @@ import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { SuiObjectChange } from '@mysten/sui/client';
 
 // Configuration parameters
-const PACKAGE_ID = '0xcc601cbb789841aea03b0a11b74f058600912797f5e7ea5394ae117d0fdfea2e'; // Replace with your package ID
+const PACKAGE_ID = '0x7f66fab42b3de6f62daaef7e2390babaec35d7766cceb74c9b438b9e21462d50'; // Replace with your package ID
 const BOND_AMOUNT = 0.01; // Only 0.01 SUI for bond tests
 const JOIN_AMOUNT = 0.01; // Only 0.01 SUI for joining bonds
 const SKIP_DOMAIN_VERIFICATION = true; // Set to false if you want to test domain verification
@@ -59,7 +59,7 @@ async function checkAndVerifyBalance(address: string, minimumRequired: number): 
 // Find the ProfileRegistry shared object
 async function findProfileRegistry(): Promise<string> {
     // Known registry ID from the publish output
-    const registryId = '0x67f12b8fb45ffd40d779addcafabcebb6030bbc75216d69039ce527b08ea5c85';
+    const registryId = '0xc4bed024c6ab43fcaaaf96bfb3803b0ec15745a9b41d022d3cf6f577591d36e9';
     console.log(`Using known ProfileRegistry with ID: ${registryId}`);
     return registryId;
 }
@@ -264,6 +264,75 @@ async function getProfileId(
         throw error;
     }
 }
+function formatSuiObjectId(bytes: number[]): string {
+    // Check if the first byte might be a length indicator and remove it if needed
+    const idBytes = bytes.length === 33 ? bytes.slice(1) : bytes;
+    
+    // Format as hex string with proper padding
+    let hexString = "";
+    for (const byte of idBytes) {
+        hexString += byte.toString(16).padStart(2, '0');
+    }
+    
+    return `0x${hexString}`;
+}
+
+// Move this function outside of createBond
+async function getUserBondIds(userBondsId: string, userAddress: string): Promise<string[]> {
+    console.log(`Getting bond IDs for user ${userAddress}...`);
+    try {
+        const tx = new Transaction();
+        tx.moveCall({
+            target: `${PACKAGE_ID}::trust::get_user_bond_ids`,
+            arguments: [
+                tx.object(userBondsId),
+                tx.pure.address(userAddress),
+            ],
+        });
+        
+        const result = await suiClient.devInspectTransactionBlock({
+            sender: userAddress,
+            transactionBlock: tx,
+        });
+
+        console.log("Raw result:", JSON.stringify(result.results?.[0]?.returnValues));
+        
+        if (!result.results || !result.results[0]?.returnValues) {
+            throw new Error("No result from get_user_bond_ids call");
+        }
+        
+        const returnValue = result.results[0].returnValues[0];
+        
+        if (!Array.isArray(returnValue) || !Array.isArray(returnValue[0])) {
+            throw new Error("Unexpected return format from get_user_bond_ids");
+        }
+        
+        // Extract the inner array which contains the bond IDs
+        const bondIdBytes = returnValue[0];
+        
+        // If this is an empty vector, return an empty array
+        if (bondIdBytes.length === 0) {
+            return [];
+        }
+        
+        // If the first element is an array, this is a vector of IDs
+        if (Array.isArray(bondIdBytes[0])) {
+            // Multiple bond IDs
+            const bondIds = bondIdBytes.map((idBytes: any) => {
+                // Convert ID using the correct format for Sui Object ID
+                return formatSuiObjectId(Array.isArray(idBytes) ? idBytes : [idBytes]);
+            });
+            return bondIds;
+        } else {
+            // Single bond ID
+            return [formatSuiObjectId(bondIdBytes)];
+        }
+    } catch (error) {
+        console.error(`Error getting bond IDs for ${userAddress}:`, error);
+        throw error;
+    }
+}
+
 
 // Function to create a bond
 async function createBond(
@@ -295,45 +364,6 @@ async function createBond(
             tx.object('0x6'),          // clock
         ],
     });
-
-
-    async function getUserBondIds(userBondsId: string, userAddress: string): Promise<number[]> {
-        console.log(`Getting bond IDs for user ${userAddress}...`);
-        try {
-            const tx = new Transaction();
-            tx.moveCall({
-                target: `${PACKAGE_ID}::trust::get_user_bond_ids`,
-                arguments: [
-                    tx.object(userBondsId),
-                    tx.pure.address(userAddress),
-                ],
-            });
-            
-            const result = await suiClient.devInspectTransactionBlock({
-                sender: userAddress, // Any address can call this read-only function
-                transactionBlock: tx,
-            });
-            
-            if (!result.results || !result.results[0]?.returnValues) {
-                throw new Error("No result from get_user_bond_ids call");
-            }
-            
-            const returnValue = result.results[0].returnValues[0];
-            // In Sui, a vector<ID> is returned as an array of strings (object IDs)
-            if (!Array.isArray(returnValue[0])) {
-                throw new Error("Unexpected return format from get_user_bond_ids");
-            }
-            
-            const bondIds = returnValue[0].map(id => Number(id));
-            console.log(`Bond IDs for user ${userAddress}:`, bondIds);
-            return bondIds;
-        } catch (error) {
-            console.error(`Error getting bond IDs for ${userAddress}:`, error);
-            throw error;
-        }
-    }
-    
-    
     
     console.log("Executing bond creation transaction...");
     const result = await suiClient.signAndExecuteTransaction({
@@ -660,6 +690,26 @@ async function hasTrustProfile(
     }
 }
 
+// Then fix the getUserBonds function
+async function getUserBonds(userBondsId: string, userAddress: string): Promise<any[]> {
+    console.log(`Fetching all bonds for user ${userAddress}...`);
+    const bondIds = await getUserBondIds(userBondsId, userAddress);
+    console.log(`Found ${bondIds.length} bond IDs:`, bondIds);
+    
+    const validBonds = [];
+    
+    for (const bondId of bondIds) {
+        try {
+            const bondInfo = await getBondInfo(bondId);
+            validBonds.push(bondInfo);
+        } catch (error:any) {
+            console.warn(`Skipping invalid bond ID ${bondId}: ${error.message}`);
+        }
+    }
+    
+    return validBonds;
+}
+
 // Main test function
 async function runTests() {
     console.log("Starting trust contract tests on testnet...");
@@ -681,6 +731,9 @@ async function runTests() {
 
         const user1ProfileId = await getProfileId(registryId, USER1_ADDRESS)
         console.log(`User1 profile ID: ${user1ProfileId}`);
+
+        const userBonds = await getUserBonds("0xde9c41f79d1b097bdaf93c1e20eb3fe1c3209a1d2a790b0f7dd86b4c4719f853", USER1_ADDRESS);
+        console.log("User bonds:", userBonds);
         
         
         // Step 1: Check if profile exists, create if it doesn't
@@ -701,6 +754,12 @@ async function runTests() {
         // // Get profile data
         const profileData = await getProfileData(user1ProfileId);
         console.log("Profile data:", profileData);
+
+
+        // const userBonds = await getUserBondIds(user1ProfileId, USER1_ADDRESS);
+        // console.log("User bonds:", userBonds);
+
+
         
         // // Step 2: Create a test bond (using minimal SUI amount)
         // console.log("\n=== Test: Create Bond ===");
