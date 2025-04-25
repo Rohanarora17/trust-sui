@@ -513,36 +513,49 @@ async function getBondInfo(bondId: string): Promise<{
     try {
         const bond = await suiClient.getObject({
             id: bondId,
-            options: { showContent: true },
+            options: { showContent: true, showDisplay: true },
         });
         
         if (bond.data?.content?.dataType !== 'moveObject') {
             throw new Error("Invalid bond object");
         }
         
+        console.log("Raw bond data:", JSON.stringify(bond.data.content, null, 2));
+        
         // Type assertion for TrustBond fields
-        const fields = bond.data.content.fields as {
-            user_1: string;
-            user_2: string;
-            bond_type: string | number;
-            bond_status: string | number;
-            money_by_user_1: { value: string | number };
-            money_by_user_2: { value: string | number };
-            bond_amount?: string | number;
-            created_at?: string | number;
-            updated_at?: string | number;
-            id?: { id: string };
-        };
+        const fields = bond.data.content.fields as any;
         
-        // Extract values
-        const moneyByUser1 = fields.money_by_user_1?.value !== undefined 
-            ? Number(fields.money_by_user_1.value) 
-            : 0;
+        // Extract balance values - handle potential nesting correctly
+        let moneyByUser1 = 0;
+        let moneyByUser2 = 0;
         
-        const moneyByUser2 = fields.money_by_user_2?.value !== undefined 
-            ? Number(fields.money_by_user_2.value) 
-            : 0;
+        // In Sui Move, Balance<SUI> objects are often structured differently
+        // Check all possible formats
+        if (fields.money_by_user_1) {
+            if (typeof fields.money_by_user_1 === 'object') {
+                if ('value' in fields.money_by_user_1) {
+                    moneyByUser1 = Number(fields.money_by_user_1.value);
+                } else if ('fields' in fields.money_by_user_1 && 'value' in fields.money_by_user_1.fields) {
+                    moneyByUser1 = Number(fields.money_by_user_1.fields.value);
+                }
+            } else if (typeof fields.money_by_user_1 === 'string' || typeof fields.money_by_user_1 === 'number') {
+                moneyByUser1 = Number(fields.money_by_user_1);
+            }
+        }
         
+        if (fields.money_by_user_2) {
+            if (typeof fields.money_by_user_2 === 'object') {
+                if ('value' in fields.money_by_user_2) {
+                    moneyByUser2 = Number(fields.money_by_user_2.value);
+                } else if ('fields' in fields.money_by_user_2 && 'value' in fields.money_by_user_2.fields) {
+                    moneyByUser2 = Number(fields.money_by_user_2.fields.value);
+                }
+            } else if (typeof fields.money_by_user_2 === 'string' || typeof fields.money_by_user_2 === 'number') {
+                moneyByUser2 = Number(fields.money_by_user_2);
+            }
+        }
+        
+        // Format values
         const bondInfo = {
             user1: fields.user_1,
             user2: fields.user_2,
@@ -556,7 +569,8 @@ async function getBondInfo(bondId: string): Promise<{
   User1: ${bondInfo.user1} (${bondInfo.moneyByUser1} SUI)
   User2: ${bondInfo.user2} (${bondInfo.moneyByUser2} SUI)
   Type: ${bondInfo.bondType} (${bondInfo.bondType === 0 ? 'one-way' : 'two-way'})
-  Status: ${bondInfo.bondStatus} (${bondInfo.bondStatus === 0 ? 'active' : bondInfo.bondStatus === 1 ? 'withdrawn' : 'broken'})`);
+  Status: ${bondInfo.bondStatus} (${bondInfo.bondStatus === 0 ? 'active' : bondInfo.bondStatus === 1 ? 'withdrawn' : 'broken'})
+  Total Value: ${bondInfo.moneyByUser1 + bondInfo.moneyByUser2} SUI`);
         
         return bondInfo;
     } catch (error) {
