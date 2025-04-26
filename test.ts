@@ -20,7 +20,7 @@ console.log("Connected to network:", suiClient.network);
 
 // Create keypair from your private key (IMPORTANT: Use environment variables for the private key in production!)
 // This is just for testing - secure your keys properly in real applications
-const user1Keypair = Ed25519Keypair.fromSecretKey("suiprivkey1qpsylkvfafzegxk36rqy5euzreurcpkdvhltmfu020qhadhzcux5q5dgjrf");
+const user1Keypair = Ed25519Keypair.fromSecretKey("");
 const USER1_ADDRESS = user1Keypair.toSuiAddress();
 console.log("Testing with address:", USER1_ADDRESS);
 
